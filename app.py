@@ -170,7 +170,7 @@ def analyze_text(text: str) -> Dict[str, Any]:
     errors = []
 
     for idx, chunk in enumerate(chunks):
-        result = call_model_for_chunk(chunk, idx, total_chunks)
+        result = analyze_chunk(chunk, idx, total_chunks)
         all_chunk_results.append(result)
 
         if "_error" in result:
