@@ -237,8 +237,6 @@ def main():
         uploaded_file = st.file_uploader("Or upload a file (.txt or .pdf)", type=["txt", "pdf"])
 
     with col_info:
-        st.markdown("**Model**")
-        st.code("Model", language="bash")
         st.markdown(
             f"- Max characters per chunk: **{MAX_CHARS_PER_CHUNK}**\n"
             "- Text is automatically split into chunks if it is long.\n"
