@@ -9,13 +9,27 @@ import google.generativeai as genai
 
 # -------------------- Config & Setup -------------------- #
 
-load_dotenv()
+# Get the absolute path to the directory containing this script
+script_dir = os.path.dirname(os.path.abspath(__file__))
 
+# Load environment variables from .env file in the same directory as the script
+env_path = os.path.join(script_dir, '.env')
+load_dotenv(env_path, override=True)
+
+# Debug information
+st.write(f"Current working directory: {os.getcwd()}")
+st.write(f"Loading .env file from: {env_path}")
+st.write(f"Files in directory: {os.listdir(script_dir)}")
+
+# Get the API key
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not GEMINI_API_KEY or GEMINI_API_KEY.strip() == "":
-    st.error("⚠️ Please set the GEMINI_API_KEY in a .env file.")
+    st.error(f"⚠️ GEMINI_API_KEY not found in environment variables. Please check your .env file at: {env_path}")
+    st.error(f"Current environment variables: {os.environ.get('GEMINI_API_KEY', 'Not found')}")
     st.stop()
+else:
+    st.success("✅ GEMINI_API_KEY successfully loaded!")
 
 genai.configure(api_key=GEMINI_API_KEY.strip())
 
