@@ -5,7 +5,6 @@ from typing import List, Dict, Any
 import streamlit as st
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
-import google.generativeai as genai
 
 # -------------------- Config & Setup -------------------- #
 
@@ -19,11 +18,8 @@ if not GEMINI_API_KEY or GEMINI_API_KEY.strip() == "":
     st.error("⚠️ GEMINI_API_KEY not found in environment variables. Please set it in your deployment environment.")
     st.stop()
 
-genai.configure(api_key=GEMINI_API_KEY.strip())
-
-# Use a fast model – good for interactive apps
-MODEL_NAME = "gemini-2.5-flash"
-model = genai.GenerativeModel(MODEL_NAME)
+# Configure your model here
+# model = YourModel(api_key=GEMINI_API_KEY.strip())
 
 # Maximum characters per chunk to send to the model
 # (you can tune this if needed)
@@ -72,9 +68,9 @@ def clean_json_output(raw: str) -> str:
     return raw
 
 
-def call_gemini_for_chunk(text: str, chunk_index: int, total_chunks: int) -> Dict[str, Any]:
+def analyze_chunk(text: str, chunk_index: int, total_chunks: int) -> Dict[str, Any]:
     """
-    Call Gemini for a single chunk and return parsed JSON result.
+    Analyze a single chunk of text and return parsed JSON result.
     The schema is defined in the prompt.
     """
     system_prompt = f"""
@@ -160,7 +156,7 @@ If you do not find any harmful content, return:
 def analyze_text(text: str) -> Dict[str, Any]:
     """
     Analyze a full text (book or chapter). Handles chunking,
-    calling Gemini for each chunk, and aggregating results.
+    calling the model for each chunk, and aggregating results.
     """
     chunks = chunk_text(text, MAX_CHARS_PER_CHUNK)
     total_chunks = len(chunks)
@@ -174,7 +170,7 @@ def analyze_text(text: str) -> Dict[str, Any]:
     errors = []
 
     for idx, chunk in enumerate(chunks):
-        result = call_gemini_for_chunk(chunk, idx, total_chunks)
+        result = call_model_for_chunk(chunk, idx, total_chunks)
         all_chunk_results.append(result)
 
         if "_error" in result:
@@ -223,7 +219,7 @@ def main():
     st.title("📚 Book Content Moderation System")
     st.write(
         "Detect harmful or sensitive content in **Arabic and English** book text "
-        "using Gemini (content moderation prototype)."
+        "(content moderation prototype)."
     )
 
     st.markdown("### 1. Input Text or Upload File")
@@ -241,8 +237,8 @@ def main():
         uploaded_file = st.file_uploader("Or upload a file (.txt or .pdf)", type=["txt", "pdf"])
 
     with col_info:
-        st.markdown("**Gemini Model**")
-        st.code(MODEL_NAME, language="bash")
+        st.markdown("**Model**")
+        st.code("Model", language="bash")
         st.markdown(
             f"- Max characters per chunk: **{MAX_CHARS_PER_CHUNK}**\n"
             "- Text is automatically split into chunks if it is long.\n"
