@@ -1,6 +1,7 @@
 import os
 import json
 from typing import List, Dict, Any
+
 import streamlit as st
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
@@ -30,6 +31,7 @@ COLOR_WHITE = "#ffffff"   # background
 
 # -------------------- Helpers -------------------- #
 def chunk_text(text: str, max_chars: int = MAX_CHARS_PER_CHUNK) -> List[str]:
+    """Split long text into character-based chunks."""
     text = text.strip()
     if len(text) <= max_chars:
         return [text]
@@ -45,6 +47,7 @@ def chunk_text(text: str, max_chars: int = MAX_CHARS_PER_CHUNK) -> List[str]:
 
 
 def clean_json_output(raw: str) -> str:
+    """Remove markdown fences / extra text and keep outer JSON object."""
     raw = raw.strip()
     if raw.startswith("```"):
         parts = raw.split("```")
@@ -61,6 +64,7 @@ def clean_json_output(raw: str) -> str:
 
 
 def try_parse_json(raw: str) -> Dict[str, Any]:
+    """Try parsing JSON, with a simple fallback clean step."""
     cleaned = clean_json_output(raw)
     try:
         return json.loads(cleaned)
@@ -73,6 +77,7 @@ def try_parse_json(raw: str) -> Dict[str, Any]:
 
 
 def analyze_chunk(text: str, idx: int, total: int) -> Dict[str, Any]:
+    """Call Gemini on one chunk and return parsed JSON (or error info)."""
     prompt = f"""
 You are a content moderation assistant for Arabic and English books.
 Return ONLY JSON as per the schema below. No text outside JSON.
@@ -119,23 +124,29 @@ Text to analyze:
 
 
 def analyze_text(text: str) -> Dict[str, Any]:
+    """Analyze full text: chunking + per-chunk calls + aggregation."""
     chunks = chunk_text(text)
     all_results, all_issues, cats = [], [], set()
     total_issues, any_harmful, errors, max_conf = 0, False, [], 0
+
     for i, ch in enumerate(chunks):
         r = analyze_chunk(ch, i, len(chunks))
         all_results.append(r)
+
         if "_error" in r:
             errors.append(r["_error"])
         if r.get("harmful"):
             any_harmful = True
+
         s = r.get("summary", {}) or {}
         total_issues += s.get("total_issues", 0)
         cats |= set(s.get("categories", []))
         max_conf = max(max_conf, s.get("confidence", 0))
+
         for issue in r.get("issues", []) or []:
-            issue["chunk_index"] = i + 1
+            issue["chunk_index"] = i + 1  # still kept internally
             all_issues.append(issue)
+
     return {
         "harmful": any_harmful,
         "issues": all_issues,
@@ -153,10 +164,15 @@ def analyze_text(text: str) -> Dict[str, Any]:
 # -------------------- Streamlit UI -------------------- #
 
 def main():
-    st.set_page_config(page_title="Book Content Moderation", page_icon="moc.png", layout="wide")
+    st.set_page_config(
+        page_title="Ministry of Culture | Content Moderation System",
+        page_icon="moc.png",
+        layout="wide",
+    )
 
-    # --- Custom CSS (colors + buttons + header) ---
-    st.markdown(f"""
+    # --- Custom CSS (colors + buttons) ---
+    st.markdown(
+        f"""
         <style>
         body {{
             background-color: {COLOR_WHITE};
@@ -177,19 +193,24 @@ def main():
             color: {COLOR_NAVY};
         }}
         </style>
-    """, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True,
+    )
 
-    # --- Header Section with logo ---
+    # --- Header Section with logo + title ---
     col_logo, col_title = st.columns([1, 6])
     with col_logo:
         st.image("moc.png", width=100)  # make sure moc.png is in same folder
     with col_title:
-        st.markdown(f"""
-        <h1 style="color:{COLOR_MAROON}; margin-bottom:0;">
-            Ministry of Culture | Content Moderation System
-        </h1>
-        <hr style="border-top: 3px solid {COLOR_ORANGE}; width: 120px; margin: 0;">
-        """, unsafe_allow_html=True)
+        st.markdown(
+            f"""
+            <h1 style="color:{COLOR_MAROON}; margin-bottom:0;">
+                Ministry of Culture | Content Moderation System
+            </h1>
+            <hr style="border-top: 3px solid {COLOR_ORANGE}; width: 120px; margin: 0;">
+            """,
+            unsafe_allow_html=True,
+        )
 
     st.write("Analyze Arabic and English book text for harmful or sensitive content.")
     st.markdown("---")
@@ -205,7 +226,7 @@ def main():
 
     uploaded_file = st.file_uploader(
         "Or upload a file (.txt or .pdf)",
-        type=["txt", "pdf"]
+        type=["txt", "pdf"],
     )
 
     # --- File Upload Logic ---
@@ -239,10 +260,33 @@ def main():
 
         st.subheader("3. Summary")
 
+        # Branded harmful / safe banner
         if harmful:
-            st.error("⚠️ Harmful or sensitive content detected.")
+            st.markdown(
+                f"""
+                <div style="background-color:{COLOR_MAROON};
+                            color:white;
+                            padding:10px;
+                            border-radius:6px;
+                            font-weight:600;">
+                    ⚠️ Harmful or sensitive content detected.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
         else:
-            st.success("✅ No harmful content detected.")
+            st.markdown(
+                f"""
+                <div style="background-color:{COLOR_NAVY};
+                            color:white;
+                            padding:10px;
+                            border-radius:6px;
+                            font-weight:600;">
+                    ✅ No harmful content detected.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
         colA, colB, colC, colD = st.columns(4)
         colA.metric("Harmful", "Yes" if harmful else "No")
@@ -255,7 +299,7 @@ def main():
             + (", ".join(s["categories"]) if s["categories"] else "None")
         )
 
-        # --------- UPDATED SECTION WITH COLORED LEVELS ---------
+        # --------- Detailed Issues with colored severity ---------
         st.subheader("4. Detailed Issues")
         if not result["issues"]:
             st.info("No specific harmful phrases were listed by the model.")
@@ -263,24 +307,37 @@ def main():
             for i, issue in enumerate(result["issues"], 1):
                 expander_title = f"Issue {i}"
                 with st.expander(expander_title):
-                    st.write(f"**Phrase:** `{issue.get('phrase', 'N/A')}`")
-                    st.write(f"**Language:** {issue.get('language', 'N/A')}")
-                    st.write(f"**Category:** {issue.get('category', 'N/A')}")
+                    phrase = issue.get("phrase", "N/A")
+                    language = issue.get("language", "N/A")
+                    category = issue.get("category", "N/A")
+                    severity = issue.get("severity", "N/A") or "N/A"
+                    severity = severity.strip().capitalize()
 
-                    severity = issue.get("severity", "N/A").strip().capitalize()
                     color_map = {
                         "High": "#d32f2f",   # Red
                         "Medium": "#f7931e", # Amber
-                        "Low": "#388e3c"     # Green
+                        "Low": "#388e3c",    # Green
                     }
-                    color = color_map.get(severity, "#0b2233")
+                    color = color_map.get(severity, COLOR_TEXT)
+                    border_color = color_map.get(severity, "#cccccc")
+
                     st.markdown(
-                        f"**Severity level:** "
-                        f"<span style='color:{color}; font-weight:600;'>{severity}</span>",
-                        unsafe_allow_html=True
+                        f"""
+                        <div style="border-left:6px solid {border_color};
+                                    padding-left:10px;">
+                            <p><strong>Phrase:</strong> `{phrase}`</p>
+                            <p><strong>Language:</strong> {language}</p>
+                            <p><strong>Category:</strong> {category}</p>
+                            <p><strong>Severity level:</strong>
+                                <span style="color:{color}; font-weight:600;">
+                                    {severity}
+                                </span>
+                            </p>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
                     )
         # --------------------------------------------------------
-
 
         if result["errors"]:
             st.warning("Some chunks had parsing issues.")
