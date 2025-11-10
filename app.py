@@ -5,6 +5,7 @@ from typing import List, Dict, Any
 import streamlit as st
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
+import google.generativeai as genai
 
 # -------------------- Config & Setup -------------------- #
 
@@ -18,11 +19,12 @@ if not GEMINI_API_KEY or GEMINI_API_KEY.strip() == "":
     st.error("⚠️ GEMINI_API_KEY not found in environment variables. Please set it in your deployment environment.")
     st.stop()
 
-# Configure your model here
-# model = YourModel(api_key=GEMINI_API_KEY.strip())
+# Configure Gemini model
+genai.configure(api_key=GEMINI_API_KEY.strip())
+MODEL_NAME = "gemini-2.5-flash"
+model = genai.GenerativeModel(MODEL_NAME)
 
 # Maximum characters per chunk to send to the model
-# (you can tune this if needed)
 MAX_CHARS_PER_CHUNK = 8000
 
 
@@ -34,7 +36,7 @@ def chunk_text(text: str, max_chars: int = MAX_CHARS_PER_CHUNK) -> List[str]:
     if len(text) <= max_chars:
         return [text]
 
-    chunks = []
+    chunks: List[str] = []
     start = 0
     while start < len(text):
         end = min(start + max_chars, len(text))
@@ -50,22 +52,70 @@ def chunk_text(text: str, max_chars: int = MAX_CHARS_PER_CHUNK) -> List[str]:
 def clean_json_output(raw: str) -> str:
     """
     Clean common LLM wrappers around JSON, like ```json ... ``` fences.
-    Returns a string that should be valid JSON.
+    Returns a string that should be valid JSON or close to it.
     """
     raw = raw.strip()
-    # Remove code fences if present
+
+    # Remove Markdown fences like ```json ... ```
     if raw.startswith("```"):
-        # e.g. ```json ... ```
-        raw = raw.strip("`")
-        # Remove possible 'json' language identifier
+        # remove leading ``` and trailing ``` if present
+        # (do it more carefully than just strip("`"))
+        parts = raw.split("```")
+        # Everything between first and last ``` is the content
+        if len(parts) >= 3:
+            raw = "".join(parts[1:-1]).strip()
+        else:
+            raw = raw.replace("```", "").strip()
+
+        # Remove possible 'json' language identifier at the start
         if raw.lower().startswith("json"):
             raw = raw[4:].strip()
-    # Try to keep only the outermost JSON object/array
+
+    # Sometimes the model adds explanations before/after JSON
+    # Try to keep only the outermost {...} or [...]
     first_brace = raw.find("{")
-    last_brace = raw.rfind("}")
-    if first_brace != -1 and last_brace != -1:
-        raw = raw[first_brace:last_brace + 1]
+    first_bracket = raw.find("[")
+    if first_brace == -1 and first_bracket == -1:
+        return raw
+
+    # Choose the earliest opening of { or [
+    if first_brace == -1 or (first_bracket != -1 and first_bracket < first_brace):
+        # JSON array
+        first = first_bracket
+        last = raw.rfind("]")
+    else:
+        # JSON object
+        first = first_brace
+        last = raw.rfind("}")
+
+    if first != -1 and last != -1 and last > first:
+        raw = raw[first:last + 1].strip()
+
     return raw
+
+
+def try_parse_json(raw: str) -> Dict[str, Any]:
+    """
+    Try to parse JSON. If it fails, try a couple of simple fixes.
+    Raise the original error if still not valid.
+    """
+    cleaned = clean_json_output(raw)
+
+    # First attempt: direct load
+    try:
+        return json.loads(cleaned)
+    except Exception as e1:
+        # Simple fallback: remove control characters that sometimes break JSON
+        cleaned2 = "".join(ch for ch in cleaned if ord(ch) >= 32 or ch in "\n\r\t")
+        try:
+            return json.loads(cleaned2)
+        except Exception as e2:
+            # Re-raise with both error messages for debugging
+            raise ValueError(
+                f"Primary JSON error: {e1}; "
+                f"Secondary JSON error after cleaning: {e2}; "
+                f"Cleaned text (first 500 chars): {cleaned2[:500]!r}"
+            )
 
 
 def analyze_chunk(text: str, chunk_index: int, total_chunks: int) -> Dict[str, Any]:
@@ -73,10 +123,10 @@ def analyze_chunk(text: str, chunk_index: int, total_chunks: int) -> Dict[str, A
     Analyze a single chunk of text and return parsed JSON result.
     The schema is defined in the prompt.
     """
-    system_prompt = f"""
+    system_prompt = """
 You are a content moderation assistant for books in both Arabic and English.
 
-Analyze the provided text for **harmful, inappropriate, or offensive** content.
+Analyze the provided text for harmful, inappropriate, or offensive content.
 Focus on content such as (but not limited to):
 
 - Hate speech or insults towards individuals or groups
@@ -90,39 +140,41 @@ Focus on content such as (but not limited to):
 - Any content that may be harmful for children
 
 The text can be in Arabic, English, or a mix of both.
-You MUST respond **only** with valid JSON in the following format:
 
-{{
+You MUST respond **only** with raw JSON. No explanations, no Markdown, no code fences.
+The JSON schema MUST be:
+
+{
   "harmful": true or false,
   "issues": [
-    {{
+    {
       "phrase": "exact phrase that is harmful",
       "category": "short category name (e.g., hate_speech, violence, sexual, self_harm, profanity, extremism, discrimination, other)",
       "severity": "Low | Medium | High",
       "language": "ar | en | mixed",
       "start_index": optional integer (or null),
       "end_index": optional integer (or null)
-    }}
+    }
   ],
-  "summary": {{
+  "summary": {
     "categories": ["list", "of", "unique", "categories"],
     "total_issues": integer,
     "confidence": integer between 0 and 100
-  }}
-}}
+  }
+}
 
-If you do not find any harmful content, return:
+If you do not find any harmful content, return exactly:
 
-{{
+{
   "harmful": false,
   "issues": [],
-  "summary": {{
+  "summary": {
     "categories": [],
     "total_issues": 0,
     "confidence": 90
-  }}
-}}
-    """.strip()
+  }
+}
+""".strip()
 
     full_prompt = (
         f"{system_prompt}\n\n"
@@ -133,12 +185,12 @@ If you do not find any harmful content, return:
     try:
         response = model.generate_content(full_prompt)
         raw_text = response.text or ""
-        cleaned = clean_json_output(raw_text)
-        parsed = json.loads(cleaned)
+        parsed = try_parse_json(raw_text)
         parsed["_raw"] = raw_text  # keep raw for debugging
         parsed["_chunk_index"] = chunk_index
         return parsed
     except Exception as e:
+        # Any parsing / API error will be captured here
         return {
             "harmful": False,
             "issues": [],
@@ -161,13 +213,13 @@ def analyze_text(text: str) -> Dict[str, Any]:
     chunks = chunk_text(text, MAX_CHARS_PER_CHUNK)
     total_chunks = len(chunks)
 
-    all_chunk_results = []
-    global_issues = []
+    all_chunk_results: List[Dict[str, Any]] = []
+    global_issues: List[Dict[str, Any]] = []
     global_categories = set()
     max_confidence = 0
     total_issues = 0
     any_harmful = False
-    errors = []
+    errors: List[str] = []
 
     for idx, chunk in enumerate(chunks):
         result = analyze_chunk(chunk, idx, total_chunks)
@@ -179,14 +231,14 @@ def analyze_text(text: str) -> Dict[str, Any]:
         if result.get("harmful"):
             any_harmful = True
 
-        summary = result.get("summary", {})
+        summary = result.get("summary", {}) or {}
         total_issues += summary.get("total_issues", 0) or 0
         for c in summary.get("categories", []) or []:
             global_categories.add(c)
 
         max_confidence = max(max_confidence, summary.get("confidence", 0) or 0)
 
-        for issue in result.get("issues", []):
+        for issue in result.get("issues", []) or []:
             issue_copy = dict(issue)
             issue_copy["chunk_index"] = idx + 1  # 1-based
             global_issues.append(issue_copy)
@@ -320,13 +372,13 @@ def main():
         with st.spinner("Analyzing content (this may take a moment for long texts)..."):
             result = analyze_text(text_input)
 
-        errors = result.get("errors", [])
+        errors = result.get("errors", []) or []
         if errors:
-            st.warning("Some chunks had parsing issues. See 'Raw Chunk Outputs' below for details.")
+            st.warning("Some chunks had parsing issues. See 'Parsing Errors' or 'Raw Chunk Outputs' below for details.")
 
         harmful = result.get("harmful", False)
-        summary = result.get("summary", {})
-        issues = result.get("issues", [])
+        summary = result.get("summary", {}) or {}
+        issues = result.get("issues", []) or []
 
         # -------------------- Summary -------------------- #
         st.markdown("### 3. Summary")
@@ -367,13 +419,20 @@ def main():
                     st.write(f"**Severity:** {issue.get('severity', 'N/A')}")
                     st.write(f"**Chunk Index:** {issue.get('chunk_index', 'N/A')}")
 
+        # -------------------- Parsing Errors -------------------- #
+        if errors:
+            with st.expander("⚠️ Parsing Errors (debug)"):
+                for e in errors:
+                    st.write("-", e)
+
         # -------------------- Raw Outputs for Debugging -------------------- #
         with st.expander("🔧 Raw Chunk Outputs (for debugging / research)"):
             for chunk_result in result.get("chunk_results", []):
-                st.markdown(
-                    f"**Chunk {chunk_result.get('_chunk_index', 0) + 1} "
-                    f"(harmful={chunk_result.get('harmful')})**"
-                )
+                idx = chunk_result.get("_chunk_index", 0) + 1
+                harmful_chunk = chunk_result.get("harmful")
+                st.markdown(f"**Chunk {idx} (harmful={harmful_chunk})**")
+                if "_error" in chunk_result:
+                    st.write(f"Error: {chunk_result['_error']}")
                 st.code(chunk_result.get("_raw", ""), language="json")
 
     st.markdown("---")
